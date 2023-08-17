@@ -1,0 +1,15 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: userapp
+spec:
+  syncPolicy:
+    automated: {}
+  project: default
+  destination:
+    namespace: argocd
+    server: https://kubernetes.default.svc
+  source:
+    path: userapp
+    repoURL: https://github.com/CodyKurtz/argocd_demo.git
+    targetRevision: HEAD

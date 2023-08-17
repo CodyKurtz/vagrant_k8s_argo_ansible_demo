@@ -1,0 +1,286 @@
+---
+- hosts: all
+  become: yes
+  vars:
+    ansible_python_interpreter: /usr/bin/python3.6
+
+  collections: 
+    - kubernetes.core
+    
+  # SETUP Environment
+  tasks:  
+  - name: Install packages
+    apt:
+      state: present
+      name:
+        - git
+        - nmap
+        - net-tools
+        - apt-transport-https
+        - ca-certificates
+        - curl
+        - gnupg
+        - virtualenv
+    tags:
+      - vm_init
+
+
+  - name: Add Docker GPG apt Key
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+    tags:
+      - vm_init
+
+
+  - name: Add Docker Repository
+    apt_repository:
+      repo: deb https://download.docker.com/linux/ubuntu bionic stable
+      state: present
+    tags:
+      - vm_init
+
+
+  - name: Update apt and install docker-ce
+    apt:
+      name: 
+        - docker-ce
+        - docker-ce-cli 
+        - containerd.io 
+        - docker-buildx-plugin
+        - docker-compose-plugin
+      state: latest
+      update_cache: yes 
+    tags:
+      - vm_init
+
+
+  - name: Adding existing user vagrant to group docker
+    user:
+      name: vagrant
+      groups: docker
+      append: yes
+    tags:
+      - vm_init
+
+    
+  - name: get google key, save in /usr/share/keyrings for newer apt deb syntax
+    get_url:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      dest: /etc/apt/trusted.gpg.d/kubernetes-archive-keyring.asc
+      mode: ugo+rw
+    tags:
+      - vm_init
+
+  
+  - name: Add K8s apt repo
+    apt_repository:
+      repo: "deb [signed-by=/etc/apt/trusted.gpg.d/kubernetes-archive-keyring.asc] https://apt.kubernetes.io/ kubernetes-xenial main"
+      state: present
+      filename: /etc/apt/sources.list.d/kubernetes
+      update_cache: yes
+      mode: 0644
+      validate_certs: no
+    tags:
+      - vm_init
+
+  - name: Install kubectl
+    apt:
+      state: present
+      name: kubectl
+    tags:
+      - vm_init
+
+
+  - name: Downloading K3Ds
+    get_url:
+      url: 'https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh'
+      dest: '/tmp/install_k3d.sh'
+      mode: 0755
+    tags:
+      - vm_init
+
+  
+  - name: Install K3D
+    shell: /tmp/install_k3d.sh
+    notify:
+      - Remove K3D Script
+    tags:
+      - vm_init
+    
+  - name: Add K3D bin dir to $PATH
+    copy:
+      dest: /etc/profile.d/k3d.sh
+      content: 'PATH=$PATH:/usr/local/bin/k3d'
+    tags:
+      - vm_init
+
+  - name: Get helm key
+    get_url:
+      url: https://baltocdn.com/helm/signing.asc
+      dest: /usr/share/keyrings/helm.asc 
+      mode: ugo+rw
+    tags:
+      - vm_init
+  
+  - name: Add Helm apt repo.
+    apt_repository:
+      repo: "deb [signed-by=/usr/share/keyrings/helm.asc] https://baltocdn.com/helm/stable/debian/ all main"
+      state: present
+      filename: /etc/apt/sources.list.d/helm-stable-debian
+      update_cache: yes
+      mode: 0644
+    tags:
+      - vm_init
+
+  - name: Install Helm
+    apt:
+      state: present
+      name: helm
+    tags:
+      - vm_init
+
+  - name: Install Docker and Kubernetes python package to build image with Ansible.
+    pip:
+      name: 
+        - docker
+        - kubernetes
+      executable: pip3
+    tags:
+      - vm_init
+
+  # Create K3Ds Cluster
+
+  - name: Get K3D cluster name.
+    shell: grep 'name:' ./files/k3d-cluster.yaml | awk '{ print $2 }' | tr -d '\"'
+    register: k3dcluster
+
+  - set_fact:
+      k3d_cluster={{ k3dcluster.stdout }}
+
+  - name: Delete Cluster if exists
+    command: k3d cluster delete {{ k3d_cluster }} || true
+    tags:
+      - cluster_init
+
+  - name: Create K3D cluster
+    shell: k3d cluster create -c ./files/k3d-cluster.yaml
+    tags:
+      - cluster_init
+
+  # Install OLM
+
+  - name: Downloading OLM
+    get_url:
+      url: 'https://github.com/operator-framework/operator-lifecycle-manager/releases/download/v0.25.0/install.sh'
+      dest: '/tmp/install_olm.sh'
+      mode: 0755
+    tags:
+      - cluster_init
+  
+  - name: Install OLM
+    shell: /tmp/install_olm.sh v0.25.0
+    notify:
+      - Remove OLM Script
+    tags:
+      - cluster_init
+
+  # Create ArgoCD NS
+  - name: Create a ArgoCD Namespace
+    kubernetes.core.k8s:
+      name: argocd
+      api_version: v1
+      kind: Namespace
+      state: present
+    tags:
+      - argo
+  
+  - name: Apply ArgoCD Catalog Source
+    kubernetes.core.k8s:
+      state: present
+      src: argocd/catalog_source.yaml
+      namespace: olm
+      wait: true 
+    tags:
+      - argo
+  
+  - name: Apply ArgoCD Operator Group
+    kubernetes.core.k8s:
+      state: present
+      src: argocd/operator_group.yaml
+      namespace: argocd
+      wait: true 
+    tags:
+      - argo
+
+  - name: Apply ArgoCD Subscription
+    kubernetes.core.k8s:
+      state: present
+      src: argocd/subscription.yaml
+      namespace: argocd
+      wait: true 
+    tags:
+      - argo
+
+  - name: Wait for ArgoCD operator to come up
+    shell: kubectl get pods -o json -n argocd
+    register: kubectl_get_pods
+    until: kubectl_get_pods.stdout|from_json|json_query('items[*].status.phase')|unique == ["Running"]
+    tags:
+      - argo
+
+  - name: Apply ArgoCD Cluster
+    kubernetes.core.k8s:
+      state: present
+      src: argocd/argocd.yaml
+      namespace: argocd
+      wait: true 
+    tags:
+      - argo
+
+  # Build Application
+  - name: Build App Docker Image
+    docker_image:
+      build:
+        path: ./files/app
+        pull: yes
+      name: myregistry.com/app
+      tag: v1
+      source: build
+    tags:
+      - app
+
+  - name: Load Docker Image
+    shell: k3d image import myregistry.com/app:v1 -c {{ k3d_cluster }}
+    tags:
+      - app
+  
+  # Deploy Application
+  - name: Apply App Secrets
+    kubernetes.core.k8s:
+      state: present
+      src: secrets.yaml
+      namespace: argocd
+    tags:
+      - app
+
+  - name: Apply Application
+    kubernetes.core.k8s:
+      state: present
+      src: helm-userapp.yaml
+      namespace: argocd
+      wait: true 
+    tags:
+      - app
+  
+  handlers:
+    - name: Remove K3D Script
+      file:
+        path: /tmp/install_k3d.sh
+        state: absent
+
+    - name: Remove OLM Script
+      file:
+        path: /tmp/install_olm.sh
+        state: absent
+

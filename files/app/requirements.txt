@@ -1,0 +1,8 @@
+jinja2==3.0.3
+Flask==1.0.3  
+Flask-MySQL==1.4.0  
+PyMySQL==0.9.3
+uWSGI
+mysql-connector-python
+cryptography
+itsdangerous==2.0.1
